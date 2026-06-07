@@ -1,0 +1,36 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: my-pod-1
+  labels:
+    app: pytorch-pod-label # label for selecting this pod
+spec:
+  containers:
+  - name: pytorch-container
+    image: presidency-headnode:9443/nvcr.io/nvidia/pytorch:24.10-py3
+    resources: # resource quota
+      requests:
+        cpu: "8"
+        memory: "16Gi"
+        nvidia.com/mig-1g.18gb: 1
+      limits:
+        cpu: "8"
+        memory: "16Gi"
+        nvidia.com/mig-1g.18gb: 1
+    command: ["/bin/bash", "-c", "while true; do sleep 3600; done"]
+                                                                           
+---
+
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: my-service-1
+spec:
+  type: NodePort
+  selector:
+    app: pytorch-pod-label
+  ports:
+    - port: 8000
+      targetPort: 8888
+      protocol: TCP
