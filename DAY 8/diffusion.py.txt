@@ -1,0 +1,245 @@
+import torch
+import matplotlib.pyplot as plt
+from torchvision import transforms
+from PIL import Image
+ 
+# ─────────────────────────────────────────────────────────────────────────────
+# STEP 1: DEFINE THE NOISE SCHEDULE
+# ─────────────────────────────────────────────────────────────────────────────
+# T = total number of noising steps
+# beta_t = how much noise to add at each step
+# We use a LINEAR schedule: starts small (0.0001), grows to (0.02)
+# Why small to large? Small betas at the start preserve structure longer.
+ 
+T     = 1000
+betas = torch.linspace(1e-4, 0.02, T)   # [beta_1, beta_2, ..., beta_1000]
+ 
+# alphas[t] = how much SIGNAL remains after ONE step at time t
+alphas    = 1.0 - betas                  # e.g., [0.9999, 0.9998, ..., 0.9800]
+ 
+# alpha_bar[t] = cumulative product of all alphas up to t
+# This tells us how much ORIGINAL signal remains after t total steps
+# alpha_bar[0] ≈ 0.9999   (nearly all signal)
+# alpha_bar[999] ≈ 0.0    (nearly no signal, almost pure noise)
+alpha_bar = torch.cumprod(alphas, dim=0)
+ 
+print("alpha_bar at various timesteps:")
+for t_val in [0, 100, 250, 500, 750, 999]:
+    print(f"  t={t_val:4d}:  alpha_bar = {alpha_bar[t_val].item():.6f}")
+# Output:
+#   t=   0:  alpha_bar = 0.999900
+#   t= 100:  alpha_bar = 0.981611
+#   t= 250:  alpha_bar = 0.911801
+#   t= 500:  alpha_bar = 0.638753
+#   t= 750:  alpha_bar = 0.204888
+#   t= 999:  alpha_bar = 0.000012   ← almost 0: pure noise
+ 
+ 
+# ─────────────────────────────────────────────────────────────────────────────
+# STEP 2: THE FORWARD DIFFUSION FUNCTION
+# ─────────────────────────────────────────────────────────────────────────────
+def add_noise(x0, t):
+    """
+    Takes a clean image x0 and a timestep t.
+    Returns: noisy image at timestep t, and the noise that was added.
+ 
+    Args:
+        x0 : clean image tensor, shape (B, C, H, W), values in [-1, 1]
+        t  : integer timestep in range [0, T-1]
+ 
+    Returns:
+        x_t   : noisy image at timestep t
+        noise : the noise that was added (we need this for training later)
+    """
+    # Sample random noise — same shape as our image
+    noise = torch.randn_like(x0)   # shape: (B, C, H, W), values ~ N(0,1)
+ 
+    # Get alpha_bar at timestep t and reshape for broadcasting
+    a = alpha_bar[t].sqrt().view(-1, 1, 1, 1)    # signal coefficient
+    b = (1 - alpha_bar[t]).sqrt().view(-1, 1, 1, 1)  # noise coefficient
+ 
+    # Apply the formula: x_t = sqrt(alpha_bar_t) * x0 + sqrt(1-alpha_bar_t) * noise
+    x_t = a * x0 + b * noise
+ 
+    return x_t, noise
+ 
+ 
+# ─────────────────────────────────────────────────────────────────────────────
+# STEP 3: VISUALISE THE FORWARD PROCESS
+# ─────────────────────────────────────────────────────────────────────────────
+# Load any image (e.g., a photo of your campus)
+img = Image.open("sample_image.jpg").convert("RGB")
+ 
+transform = transforms.Compose([
+    transforms.Resize((64, 64)),
+    transforms.ToTensor(),
+    transforms.Normalize([0.5]*3, [0.5]*3)   # Normalise to [-1, 1]
+])
+x0 = transform(img).unsqueeze(0)   # Add batch dimension: (1, 3, 64, 64)
+ 
+# Show the image at 6 different noise levels
+timesteps = [0, 200, 400, 600, 800, 999]
+fig, axes = plt.subplots(1, 6, figsize=(16, 3))
+ 
+for ax, t_val in zip(axes, timesteps):
+    t_tensor     = torch.tensor([t_val])
+    noisy_img, _ = add_noise(x0, t_tensor)
+ 
+    # Convert back to displayable image: unnormalise from [-1,1] to [0,1]
+    display = (noisy_img[0].permute(1, 2, 0).numpy() * 0.5 + 0.5).clip(0, 1)
+    ax.imshow(display)
+    ax.set_title(f"t = {t_val}", fontsize=11)
+    ax.axis("off")
+ 
+plt.suptitle("Forward Diffusion: Clean Image --> Pure Noise (left to right)", y=1.02)
+plt.savefig("forward_diffusion.png", dpi=150, bbox_inches='tight')
+print("Saved: forward_diffusion.png")
+
+
+
+
+from diffusers import UNet2DModel
+from torch.optim import AdamW
+ 
+# ─────────────────────────────────────────────────────────────────────────────
+# THE DENOISER: U-NET ARCHITECTURE
+# ─────────────────────────────────────────────────────────────────────────────
+# We use a U-Net (encoder + decoder with skip connections).
+# It takes TWO inputs:
+#   1. The noisy image x_t  (shape: B, C, H, W)
+#   2. The timestep t        (a single integer per image)
+# It outputs:
+#   - The predicted noise (same shape as the input image)
+#
+# Why U-Net? It has skip connections (shortcuts from encoder to decoder)
+# that help preserve fine details while denoising.
+ 
+unet = UNet2DModel(
+    sample_size          = 64,           # Image size (height=width=64)
+    in_channels          = 3,            # RGB input (3 channels)
+    out_channels         = 3,            # Predicts noise (same shape)
+    layers_per_block     = 2,            # 2 ResNet layers per block
+    block_out_channels   = (128, 256, 512, 512),  # Channels at each scale
+    down_block_types     = ("DownBlock2D", "DownBlock2D", "AttnDownBlock2D", "DownBlock2D"),
+    up_block_types       = ("UpBlock2D",   "AttnUpBlock2D", "UpBlock2D",     "UpBlock2D"),
+    # AttnDownBlock2D / AttnUpBlock2D = these blocks include Self-Attention
+    # Self-Attention lets the model see the whole image at once (not just local patches)
+).to(device)
+ 
+optimizer = AdamW(unet.parameters(), lr=1e-4)   # AdamW is Adam with weight decay
+ 
+print(f"Number of parameters in U-Net: {sum(p.numel() for p in unet.parameters()):,}")
+# Typical output: 28,000,000 (28 million parameters)
+ 
+ 
+# ─────────────────────────────────────────────────────────────────────────────
+# ONE TRAINING STEP — Explained line by line
+# ─────────────────────────────────────────────────────────────────────────────
+def training_step(batch_of_clean_images):
+    """
+    Takes a batch of clean images (x_0) and runs one training iteration.
+    Returns the training loss.
+    """
+    batch_size = batch_of_clean_images.shape[0]
+ 
+    # 1. Sample random timesteps — different for each image in the batch
+    #    e.g., image 0 gets t=234, image 1 gets t=891, etc.
+    t = torch.randint(0, T, (batch_size,), device=device).long()
+ 
+    # 2. Add noise to get noisy images x_t
+    x_t, actual_noise = add_noise(batch_of_clean_images.to(device), t)
+    # x_t         : the noisy images — THIS is what the U-Net sees
+    # actual_noise: the noise that was added — THIS is what we want to predict
+ 
+    # 3. Run the U-Net: given noisy image and timestep, predict the noise
+    #    The U-Net takes (x_t, t) as input:
+    #      x_t is the noisy image
+    #      t is the timestep (important! the model needs to know how noisy the image is)
+    predicted_noise = unet(x_t, t).sample   # .sample extracts the tensor from the output object
+ 
+    # 4. Compute loss: how different is predicted_noise from actual_noise?
+    #    MSE = Mean Squared Error = average of (difference)^2 over all pixels
+    loss = torch.nn.functional.mse_loss(predicted_noise, actual_noise)
+ 
+    # 5. Backpropagation — standard PyTorch training steps
+    optimizer.zero_grad()  # Clear old gradients
+    loss.backward()        # Compute gradients w.r.t. the loss
+    optimizer.step()       # Update weights to reduce the loss
+ 
+    return loss.item()     # Return as a Python float for logging
+ 
+ 
+# ─────────────────────────────────────────────────────────────────────────────
+# TRAINING LOOP
+# ─────────────────────────────────────────────────────────────────────────────
+for epoch in range(NUM_EPOCHS):
+    for step, (images, _) in enumerate(loader):
+ 
+        loss = training_step(images)
+ 
+        if step % 100 == 0:
+            print(f"Epoch {epoch+1}/{NUM_EPOCHS}  Step {step}/{len(loader)}  Loss: {loss:.6f}")
+            # Expected: loss starts around 1.0 and gradually decreases to ~0.01-0.05
+@torch.no_grad()   # During sampling we don't need gradients (saves memory)
+def generate_images(unet, num_images=4, image_size=64):
+    """
+    Generate new images by running the reverse diffusion process.
+    This is also called 'sampling' or 'inference'.
+ 
+    Starting point: pure Gaussian noise (no image at all)
+    Process: run T=1000 denoising steps (T to 0)
+    End result: clean generated images
+    """
+    print(f"Generating {num_images} images with {T} denoising steps...")
+ 
+    # STEP 1: Start from pure noise — completely random
+    # Shape: (num_images, channels, height, width)
+    x = torch.randn(num_images, 3, image_size, image_size).to(device)
+    print(f"Starting from noise: shape = {x.shape}")
+ 
+    # STEP 2: Iterate from t = T-1 (maximum noise) down to t = 0 (clean)
+    for t_val in reversed(range(T)):   # Goes: 999, 998, 997, ..., 1, 0
+ 
+        # Create a batch of identical timestep values
+        # All images in our batch are at the same timestep
+        t_batch = torch.full((num_images,), t_val, dtype=torch.long, device=device)
+ 
+        # STEP 3: Ask U-Net: "Given this noisy image at timestep t, what noise is in it?"
+        noise_pred = unet(x, t_batch).sample
+ 
+        # STEP 4: Use the predicted noise to get a LESS noisy version
+        # Mathematical derivation (simplified DDPM formula):
+        alpha_t     = alphas[t_val]
+        alpha_bar_t = alpha_bar[t_val]
+        beta_t      = betas[t_val]
+ 
+        # Compute the mean of the posterior distribution p(x_{t-1} | x_t)
+        # This is the "expected cleaner image" given our current noisy image
+        coefficient = beta_t / (1 - alpha_bar_t).sqrt()
+        x_mean      = (1 / alpha_t.sqrt()) * (x - coefficient * noise_pred)
+ 
+        # STEP 5: Add a TINY bit of noise back (only for t > 0)
+        # Why? The reverse process is slightly stochastic (random)
+        # At the very last step (t=0), we don't add noise — we want the final image
+        if t_val > 0:
+            variance  = beta_t * (1 - alpha_bar[t_val-1]) / (1 - alpha_bar_t)
+            x = x_mean + variance.sqrt() * torch.randn_like(x)
+        else:
+            x = x_mean
+ 
+        # Log progress every 100 steps
+        if t_val % 200 == 0:
+            print(f"  Denoising step t={t_val:4d}: noise level = {x.std().item():.3f}")
+ 
+    # STEP 6: Rescale from [-1, 1] to [0, 1] for display
+    images = (x.clamp(-1, 1) + 1) / 2   # Shift to [0, 1]
+    print(f"Done! Generated images shape: {images.shape}")   # [4, 3, 64, 64]
+    return images
+ 
+# Generate 4 sample images
+generated = generate_images(unet, num_images=4)
+vutils.save_image(generated, "diffusion_samples.png", nrow=2)
+
+
+
+
