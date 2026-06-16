@@ -1,0 +1,36 @@
+{
+  "expo": {
+    "name": "Developer Portfolio",
+    "slug": "developer-portfolio",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./src/assets/icon.png",
+    "userInterfaceStyle": "dark",
+    "splash": {
+      "image": "./src/assets/splash.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#09090B"
+    },
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "com.portfolio.developer"
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./src/assets/adaptive-icon.png",
+        "backgroundColor": "#09090B"
+      },
+      "package": "com.portfolio.developer"
+    },
+    "web": {
+      "favicon": "./src/assets/favicon.png",
+      "bundler": "metro"
+    },
+    "plugins": [
+      "expo-router"
+    ],
+    "experiments": {
+      "typedRoutes": true
+    }
+  }
+}
